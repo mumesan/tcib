@@ -9,9 +9,7 @@ cd ${WORKDIR}
 # Create target directory structure with arch-specific subdirectories
 TARGET_DIR="/usr/share/ironic-operator/var-lib-ironic"
 mkdir -p ${TARGET_DIR}/httpboot/x86_64
-mkdir -p ${TARGET_DIR}/httpboot/aarch64
 mkdir -p ${TARGET_DIR}/tftpboot/x86_64
-mkdir -p ${TARGET_DIR}/tftpboot/aarch64
 mkdir -p ${TARGET_DIR}/tftpboot/pxelinux.cfg
 
 # Download boot asset packages for x86_64
@@ -37,21 +35,25 @@ fi
 # Download boot asset packages for aarch64
 mkdir -p ${WORKDIR}/aarch64
 cd ${WORKDIR}/aarch64
-dnf download --forcearch=aarch64 --setopt=*.skip_if_unavailable=True ipxe-bootimgs-aarch64 grub2-efi-aa64 shim-aa64
+if dnf download --forcearch=aarch64 --setopt=*.skip_if_unavailable=True ipxe-bootimgs-aarch64 grub2-efi-aa64 shim-aa64 2>/dev/null; then
+    mkdir -p ${TARGET_DIR}/httpboot/aarch64
+    mkdir -p ${TARGET_DIR}/tftpboot/aarch64
+    # Extract aarch64 RPMs
+    for rpm in *.rpm; do
+        rpm2cpio ${rpm} | cpio -idmv
+    done
 
-# Extract aarch64 RPMs
-for rpm in *.rpm; do
-    rpm2cpio ${rpm} | cpio -idmv
-done
-
-# Check for expected EFI directories for aarch64
-if [ -d "${WORKDIR}/aarch64/boot/efi/EFI/centos" ]; then
-    efi_dir_aa64=centos
-elif [ -d "${WORKDIR}/aarch64/boot/efi/EFI/redhat" ]; then
-    efi_dir_aa64=redhat
+    # Check for expected EFI directories for aarch64
+    if [ -d "${WORKDIR}/aarch64/boot/efi/EFI/centos" ]; then
+        efi_dir_aa64=centos
+    elif [ -d "${WORKDIR}/aarch64/boot/efi/EFI/redhat" ]; then
+        efi_dir_aa64=redhat
+    else
+        echo "No aarch64 EFI directory detected"
+        exit 1
+    fi
 else
-    echo "No aarch64 EFI directory detected"
-    exit 1
+    echo "WARNING: aarch64 boot asset packages unavailable, skipping aarch64 support"
 fi
 
 # Copy x86_64 iPXE and grub files to arch-specific directories
@@ -68,13 +70,14 @@ for dir in httpboot tftpboot; do
     # x86_64 UEFI boot files (shim and grub)
     cp ${WORKDIR}/x86_64/boot/efi/EFI/${efi_dir_x86}/shimx64.efi ${TARGET_DIR}/${dir}/x86_64/bootx64.efi
     cp ${WORKDIR}/x86_64/boot/efi/EFI/${efi_dir_x86}/grubx64.efi ${TARGET_DIR}/${dir}/x86_64/grubx64.efi
+    if [ -n "${efi_dir_aa64}" ]; then
+        # aarch64 iPXE files
+        cp ${WORKDIR}/aarch64/usr/share/ipxe/arm64-efi/snponly.efi ${TARGET_DIR}/${dir}/aarch64/snponly.efi
 
-    # aarch64 iPXE files
-    cp ${WORKDIR}/aarch64/usr/share/ipxe/arm64-efi/snponly.efi ${TARGET_DIR}/${dir}/aarch64/snponly.efi
-
-    # aarch64 UEFI boot files (shim and grub)
-    cp ${WORKDIR}/aarch64/boot/efi/EFI/${efi_dir_aa64}/shimaa64.efi ${TARGET_DIR}/${dir}/aarch64/bootaa64.efi
-    cp ${WORKDIR}/aarch64/boot/efi/EFI/${efi_dir_aa64}/grubaa64.efi ${TARGET_DIR}/${dir}/aarch64/grubaa64.efi
+        # aarch64 UEFI boot files (shim and grub)
+        cp ${WORKDIR}/aarch64/boot/efi/EFI/${efi_dir_aa64}/shimaa64.efi ${TARGET_DIR}/${dir}/aarch64/bootaa64.efi
+        cp ${WORKDIR}/aarch64/boot/efi/EFI/${efi_dir_aa64}/grubaa64.efi ${TARGET_DIR}/${dir}/aarch64/grubaa64.efi
+    fi
 done
 
 # Ensure all files are readable
@@ -94,19 +97,21 @@ popd
 
 echo "x86_64 ESP image created successfully at ${TARGET_DIR}/httpboot/x86_64/esp.img"
 
-# Build aarch64 ESP image
-pushd ${TARGET_DIR}/httpboot/aarch64
-dd if=/dev/zero of=esp.img bs=4096 count=2048
-mkfs.msdos -F 12 -n 'ESP_IMAGE' esp.img
+if [ -n "${efi_dir_aa64}" ]; then
+    # Build aarch64 ESP image
+    pushd ${TARGET_DIR}/httpboot/aarch64
+    dd if=/dev/zero of=esp.img bs=4096 count=2048
+    mkfs.msdos -F 12 -n 'ESP_IMAGE' esp.img
 
-mmd -i esp.img EFI
-mmd -i esp.img EFI/BOOT
-mcopy -i esp.img -v bootaa64.efi ::EFI/BOOT
-mcopy -i esp.img -v grubaa64.efi ::EFI/BOOT
-mdir -i esp.img ::EFI/BOOT
-popd
+    mmd -i esp.img EFI
+    mmd -i esp.img EFI/BOOT
+    mcopy -i esp.img -v bootaa64.efi ::EFI/BOOT
+    mcopy -i esp.img -v grubaa64.efi ::EFI/BOOT
+    mdir -i esp.img ::EFI/BOOT
+    popd
 
-echo "aarch64 ESP image created successfully at ${TARGET_DIR}/httpboot/aarch64/esp.img"
+    echo "aarch64 ESP image created successfully at ${TARGET_DIR}/httpboot/aarch64/esp.img"
+fi
 
 # Create compatibility symlinks in httpboot and tftpboot for backwards compatibility
 for dir in httpboot tftpboot; do
